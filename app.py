@@ -3,14 +3,16 @@ from github import Github
 import google.generativeai as genai
 import json
 import datetime
+import os
+from typing import Any, Dict, List, Optional, Set, Tuple, cast
 
-GITHUB_TOKEN = "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"
-GEMINI_API_KEY = "AIzaSyBuMqhJmGwAweLacXREt-5_fzQYIWSDKuY"
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 
 st.set_page_config(layout="wide")
 
 
-def parse_repo_url(url: str):
+def parse_repo_url(url: Optional[str]) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     if url is None:
         return None, None, "Please paste a GitHub repository URL."
 
@@ -87,32 +89,54 @@ def parse_repo_url(url: str):
 
 
 @st.cache_data(show_spinner=False, ttl=900)
-def fetch_repo_data(owner: str, repo_name: str):
+def fetch_repo_data(owner: str, repo_name: str) -> Dict[str, Any]:
     token = (GITHUB_TOKEN or "").strip()
-    if not token or token == "YOUR_GITHUB_TOKEN":
-        gh = Github()
-    else:
+
+    # Prefer authenticated client if a token is configured, but gracefully
+    # fall back to anonymous access for public repositories.
+    if token:
         gh = Github(token)
+    else:
+        gh = Github()
 
     full_name = f"{owner}/{repo_name}"
-    repo = gh.get_repo(full_name)
-
-    contents = []
-    folder_names = set()
-    file_names = set()
 
     try:
-        root_items = repo.get_contents("")
-        for item in root_items:
-            name = (item.name or "").strip()
-            item_type = (item.type or "").strip()
-            contents.append({"name": name, "type": item_type})
-            if item_type == "dir":
-                folder_names.add(name.lower())
-            elif item_type == "file":
-                file_names.add(name.lower())
+        repo = gh.get_repo(full_name)
     except Exception:
-        root_items = []
+        # Retry without a token in case the configured token is invalid or
+        # missing scopes but the repo is public.
+        try:
+            repo = Github().get_repo(full_name)
+        except Exception as exc:
+            # Let the caller surface a clear error message.
+            raise RuntimeError(f"GitHub API error while fetching {full_name}: {exc}")
+
+    contents: List[Dict[str, str]] = []
+    folder_names: Set[str] = set()
+    file_names: Set[str] = set()
+
+    try:
+        root = repo.get_contents("")
+        if isinstance(root, list):
+            root_items = root
+        else:
+            root_items = [root]
+
+        for item in root_items:
+            name = (getattr(item, "name", "") or "").strip()
+            item_type = (getattr(item, "type", "") or "").strip()
+            contents.append({"name": name, "type": item_type})
+            lower_name = name.lower()
+            if item_type == "dir":
+                folder_names.add(lower_name)
+            elif item_type == "file":
+                file_names.add(lower_name)
+    except Exception:
+        # If anything fails, fall back to empty collections
+        contents = []
+        folder_names = set()
+        file_names = set()
 
     readme_exists = False
     for fn in file_names:
@@ -132,6 +156,40 @@ def fetch_repo_data(owner: str, repo_name: str):
     except Exception:
         languages = {}
 
+    # --- NEW: Fetch Branch & PR Data (Best Practices) ---
+    branch_count = 1
+    try:
+        # Getting total count might be slow on huge repos, so we just check if > 1
+        branches = repo.get_branches()
+        branch_count = branches.totalCount
+    except Exception:
+        branch_count = 1
+
+    pr_count = 0
+    try:
+        # Just checking recent PRs to see if they use them
+        pulls = repo.get_pulls(state='all')
+        pr_count = pulls.totalCount
+    except Exception:
+        pr_count = 0
+
+    # --- NEW: Fetch README Content (Documentation Quality) ---
+    readme_content = ""
+    if readme_exists:
+        try:
+            readme_obj = repo.get_readme()
+            readme_content = readme_obj.decoded_content.decode("utf-8")[:1500] # First 1500 chars
+        except Exception:
+            readme_content = ""
+
+    # --- NEW: Check for Config/Quality Files ---
+    quality_files: List[str] = []
+    known_configs: Set[str] = {".gitignore", ".editorconfig", ".eslintrc", ".prettierrc", "pyproject.toml", "package.json", "requirements.txt", "pom.xml", "dockerfile"}
+    for fn in file_names:
+        for config in known_configs:
+            if config in fn or fn.endswith(config):
+                quality_files.append(fn)
+    
     commit_count = 0
     last_commit_date = None
     try:
@@ -153,7 +211,24 @@ def fetch_repo_data(owner: str, repo_name: str):
         commit_count = 0
         last_commit_date = None
 
-    repo_info = {
+    # --- NEW: Fetch License & Contributors ---
+    license_name = "None"
+    try:
+        lic = repo.get_license()
+        license_name = lic.license.name
+    except Exception:
+        license_name = "None"
+
+    contributors_count = 0
+    try:
+        # Getting total count might be slow on huge repos, so we just check first page size or similar
+        # For speed, we might just get the first few
+        contributors = repo.get_contributors()
+        contributors_count = contributors.totalCount
+    except Exception:
+        contributors_count = 0
+
+    repo_info: Dict[str, Any] = {
         "full_name": getattr(repo, "full_name", full_name),
         "name": getattr(repo, "name", repo_name),
         "description": getattr(repo, "description", "") or "",
@@ -163,9 +238,13 @@ def fetch_repo_data(owner: str, repo_name: str):
         "open_issues_count": int(getattr(repo, "open_issues_count", 0) or 0),
         "default_branch": getattr(repo, "default_branch", "") or "",
         "readme_exists": bool(readme_exists),
+        "branch_count": int(branch_count),
+        "pr_count": int(pr_count),
+        "license_name": license_name,
+        "contributors_count": int(contributors_count),
     }
 
-    commits_info = {
+    commits_info: Dict[str, Any] = {
         "count": int(commit_count),
         "last_date": last_commit_date,
     }
@@ -177,34 +256,29 @@ def fetch_repo_data(owner: str, repo_name: str):
         "commits": commits_info,
         "folders": sorted(list(folder_names)),
         "files": sorted(list(file_names)),
+        "readme_content": readme_content,
+        "quality_files": sorted(list(set(quality_files))),
     }
 
 
-def calculate_score(repo, contents, languages, commits):
-    score = 0
+def calculate_score(repo: Dict[str, Any], contents: List[Dict[str, str]], languages: Dict[str, int], commits: Dict[str, Any], quality_files: List[str]) -> Dict[str, Any]:
+    score: int = 0
+    breakdown: List[str] = []
 
+    # 1. Documentation (20 pts)
     readme_exists = False
     try:
-        if isinstance(repo, dict) and bool(repo.get("readme_exists")):
-            readme_exists = True
+        readme_exists = bool(repo.get("readme_exists"))
     except Exception:
         readme_exists = False
-
-    if not readme_exists:
-        try:
-            for item in contents or []:
-                name = (item.get("name", "") or "").lower()
-                typ = (item.get("type", "") or "").lower()
-                if typ == "file" and name.startswith("readme"):
-                    readme_exists = True
-                    break
-        except Exception:
-            readme_exists = False
-
     if readme_exists:
         score += 20
+        breakdown.append("✅ README exists (+20)")
+    else:
+        breakdown.append("❌ Missing README (0/20)")
 
-    folder_set = set()
+    # 2. Testing (20 pts)
+    folder_set: Set[str] = set()
     try:
         for item in contents or []:
             name = (item.get("name", "") or "").strip().lower()
@@ -216,7 +290,11 @@ def calculate_score(repo, contents, languages, commits):
 
     if ("test" in folder_set) or ("tests" in folder_set):
         score += 20
+        breakdown.append("✅ Tests folder detected (+20)")
+    else:
+        breakdown.append("❌ No tests folder found (0/20)")
 
+    # 3. Activity & Consistency (15 pts)
     commit_count = 0
     try:
         commit_count = int((commits or {}).get("count", 0) or 0)
@@ -225,16 +303,49 @@ def calculate_score(repo, contents, languages, commits):
 
     if commit_count > 10:
         score += 15
+        breakdown.append("✅ Active commit history (>10 commits) (+15)")
+    else:
+        breakdown.append(f"⚠️ Low commit count ({commit_count}) (0/15)")
 
+    # 4. Structure & Organization (10 pts)
     if ("src" in folder_set) or ("app" in folder_set) or ("lib" in folder_set):
-        score += 15
+        score += 10
+        breakdown.append("✅ Standard folder structure (src/app/lib) (+10)")
+    else:
+        breakdown.append("⚠️ Non-standard root structure (0/10)")
 
+    # 5. Tech Stack & Quality Indicators (15 pts)
+    # Has languages?
+    has_langs = False
     try:
-        if isinstance(languages, dict) and len(languages.keys()) > 0:
-            score += 10
+        has_langs = len(languages.keys()) > 0
     except Exception:
-        pass
+        has_langs = False
+    
+    # Has config files? (e.g. .gitignore)
+    has_config = len(quality_files) > 0
+    
+    if has_langs:
+        score += 5
+        breakdown.append("✅ Languages detected (+5)")
+    if has_config:
+        score += 10
+        breakdown.append("✅ Config/Quality files present (+10)")
+    else:
+        breakdown.append("⚠️ No config/quality files found (0/10)")
 
+    # 6. Best Practices / Workflow (10 pts)
+    # Branches > 1 or PRs > 0
+    branch_count = int(repo.get("branch_count", 1))
+    pr_count = int(repo.get("pr_count", 0))
+    
+    if branch_count > 1 or pr_count > 0:
+        score += 10
+        breakdown.append("✅ Uses Branches/PRs (+10)")
+    else:
+        breakdown.append("⚠️ Single branch / No PRs detected (0/10)")
+
+    # 7. Recency (5 pts)
     last_commit_date = None
     try:
         last_commit_date = (commits or {}).get("last_date")
@@ -249,9 +360,20 @@ def calculate_score(repo, contents, languages, commits):
             else:
                 last_dt = last_commit_date
             if now - last_dt <= datetime.timedelta(days=90):
-                score += 20
+                score += 5
+                breakdown.append("✅ Recent activity (<90 days) (+5)")
+            else:
+                breakdown.append("⚠️ No recent activity (0/5)")
         except Exception:
             pass
+    
+    # 8. License (5 pts)
+    license_name = str(repo.get("license_name", "None"))
+    if license_name and license_name != "None":
+        score += 5
+        breakdown.append("✅ License found (+5)")
+    else:
+        breakdown.append("⚠️ No License found (0/5)")
 
     if score > 100:
         score = 100
@@ -259,19 +381,22 @@ def calculate_score(repo, contents, languages, commits):
     if score < 0:
         score = 0
 
-    return int(score)
+    return {"score": int(score), "breakdown": breakdown}
 
 
-def generate_ai_insights(repo_info, contents, languages, commits, score):
-    fallback_summary = "AI summary unavailable. Showing a quick metadata-based overview."
-    fallback_roadmap = []
+def generate_ai_insights(repo_info: Dict[str, Any], contents: List[Dict[str, str]], languages: Dict[str, int], commits: Dict[str, Any], score_data: Dict[str, Any], readme_content: str, quality_files: List[str]) -> Dict[str, Any]:
+    score: int = int(score_data.get("score", 0))
+    breakdown: List[str] = cast(List[str], score_data.get("breakdown", []) or [])
+
+    fallback_summary: str = "AI summary unavailable. Showing a quick metadata-based overview."
+    fallback_roadmap: List[str] = []
 
     try:
         readme_exists = bool((repo_info or {}).get("readme_exists"))
     except Exception:
         readme_exists = False
 
-    folder_set = set()
+    folder_set: Set[str] = set()
     try:
         for item in contents or []:
             if (item.get("type", "") or "").lower() == "dir":
@@ -288,27 +413,18 @@ def generate_ai_insights(repo_info, contents, languages, commits, score):
         commit_count = 0
         last_commit_date = None
 
-    langs_list = []
+    langs_list: List[str] = []
     try:
-        if isinstance(languages, dict):
-            langs_list = sorted([k for k in languages.keys() if k])
+        langs_list = sorted([k for k in languages.keys() if k])
     except Exception:
         langs_list = []
 
     try:
-        last_commit_str = "unknown"
-        if last_commit_date is not None:
-            try:
-                last_commit_str = last_commit_date.isoformat()
-            except Exception:
-                last_commit_str = "unknown"
-
         fallback_summary = (
             f"Repository '{(repo_info or {}).get('full_name', '')}' looks "
             f"{'active' if commit_count > 10 else 'lightly maintained'} with "
-            f"{commit_count} commits and languages detected: "
-            f"{', '.join(langs_list) if langs_list else 'none'}. "
-            f"Last commit: {last_commit_str}. Score: {score}/100."
+            f"{commit_count} commits. "
+            f"Score: {score}/100."
         )
     except Exception:
         fallback_summary = "AI summary unavailable. Showing a quick metadata-based overview."
@@ -332,10 +448,11 @@ def generate_ai_insights(repo_info, contents, languages, commits, score):
         return {"summary": fallback_summary, "roadmap": fallback_roadmap[:3]}
 
     try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-pro")
+        genai_any = cast(Any, genai)
+        genai_any.configure(api_key=api_key)
+        model = genai_any.GenerativeModel("gemini-pro")
 
-        contents_preview = []
+        contents_preview: List[str] = []
         try:
             for item in (contents or [])[:40]:
                 nm = item.get("name", "")
@@ -356,17 +473,23 @@ def generate_ai_insights(repo_info, contents, languages, commits, score):
             f"- stars: {(repo_info or {}).get('stargazers_count', 0)}\n"
             f"- forks: {(repo_info or {}).get('forks_count', 0)}\n"
             f"- open_issues: {(repo_info or {}).get('open_issues_count', 0)}\n"
-            f"- default_branch: {(repo_info or {}).get('default_branch', '')}\n"
             f"- readme_exists: {bool((repo_info or {}).get('readme_exists'))}\n"
             f"- languages: {', '.join(langs_list) if langs_list else 'none'}\n"
             f"- commit_count: {commit_count}\n"
+            f"- branch_count: {(repo_info or {}).get('branch_count', 1)}\n"
+            f"- pr_count: {(repo_info or {}).get('pr_count', 0)}\n"
+            f"- license: {(repo_info or {}).get('license_name', 'None')}\n"
+            f"- contributors: {(repo_info or {}).get('contributors_count', 0)}\n"
+            f"- config_files_detected: {', '.join(quality_files) if quality_files else 'none'}\n"
             f"- last_commit_iso: {last_commit_date.isoformat() if last_commit_date is not None and hasattr(last_commit_date, 'isoformat') else 'unknown'}\n"
             f"- score: {score}/100\n"
-            f"- root_contents_preview: {', '.join(contents_preview) if contents_preview else 'none'}\n\n"
+            f"- score_breakdown: {', '.join(breakdown)}\n"
+            f"- root_contents_preview: {', '.join(contents_preview) if contents_preview else 'none'}\n"
+            f"- readme_snippet_start: {readme_content[:500] if readme_content else 'N/A'}\n\n"
             "Constraints:\n"
-            "- Keep summary short (1-3 sentences).\n"
-            "- Roadmap must be 3 actionable steps personalized to the repository.\n"
-            "- Output must be valid JSON that can be parsed with json.loads.\n"
+            "- Summary: Evaluate code quality, documentation, and best practices based on the data provided. Be honest.\n"
+            "- Roadmap: 3 specific, actionable steps. If score is low, focus on basics (README, .gitignore). If high, focus on CI/CD or tests.\n"
+            "- Output must be valid JSON.\n"
         )
 
         resp = model.generate_content(prompt)
@@ -394,19 +517,26 @@ def generate_ai_insights(repo_info, contents, languages, commits, score):
         if not isinstance(parsed, dict):
             return {"summary": fallback_summary, "roadmap": fallback_roadmap[:3]}
 
-        summary = parsed.get("summary")
-        roadmap = parsed.get("roadmap")
+        parsed_dict: Dict[str, Any] = cast(Dict[str, Any], parsed)
+        raw_summary = parsed_dict.get("summary")
+        raw_roadmap = parsed_dict.get("roadmap")
 
-        if not isinstance(summary, str) or not summary.strip():
+        if isinstance(raw_summary, str) and raw_summary.strip():
+            summary = raw_summary
+        else:
             summary = fallback_summary
 
-        if not isinstance(roadmap, list) or len(roadmap) == 0:
-            roadmap = fallback_roadmap[:3]
+        roadmap_list: List[str] = []
+        if isinstance(raw_roadmap, list):
+            for step in cast(List[Any], raw_roadmap):
+                if isinstance(step, str) and step.strip():
+                    roadmap_list.append(step.strip())
+        if not roadmap_list:
+            roadmap_list = fallback_roadmap[:3]
 
-        cleaned = []
-        for step in roadmap:
-            if isinstance(step, str) and step.strip():
-                cleaned.append(step.strip())
+        cleaned: List[str] = []
+        for step in roadmap_list:
+            cleaned.append(step)
         if len(cleaned) < 3:
             for step in fallback_roadmap:
                 if len(cleaned) >= 3:
@@ -419,90 +549,139 @@ def generate_ai_insights(repo_info, contents, languages, commits, score):
     except Exception:
         return {"summary": fallback_summary, "roadmap": fallback_roadmap[:3]}
 
-st.markdown(
-    """
-<style>
-:root {
-  --bg: #0e1117;
-  --accent: #00ffff;
-  --card: rgba(255, 255, 255, 0.08);
-  --card-border: rgba(0, 255, 255, 0.22);
-  --text: rgba(255, 255, 255, 0.92);
-  --muted: rgba(255, 255, 255, 0.72);
-}
+st.sidebar.title("⚙️ Setup & Status")
 
-.stApp {
-  background: radial-gradient(1200px 600px at 20% 10%, rgba(0, 255, 255, 0.10), transparent 55%),
-              radial-gradient(900px 500px at 85% 15%, rgba(0, 255, 255, 0.07), transparent 55%),
-              var(--bg);
-  color: var(--text);
-}
-
-h1, h2, h3 {
-  color: var(--text);
-}
-
-.space-card {
-  background: var(--card);
-  border: 1px solid var(--card-border);
-  border-radius: 18px;
-  padding: 18px 18px;
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  box-shadow: 0 0 0 1px rgba(0,255,255,0.08) inset;
-}
-
-.neon-title {
-  font-weight: 700;
-  letter-spacing: 0.6px;
-}
-
-.neon-accent {
-  color: var(--accent);
-}
-
-.kpi {
-  font-size: 44px;
-  font-weight: 800;
-  line-height: 1.0;
-  margin: 0;
-}
-
-.kpi-sub {
-  margin-top: 6px;
-  color: var(--muted);
-}
-
-.meta {
-  margin-top: 12px;
-  color: var(--muted);
-  font-size: 14px;
-  line-height: 1.45;
-}
-
-hr.space {
-  border: none;
-  border-top: 1px solid rgba(0,255,255,0.18);
-  margin: 14px 0;
-}
-
-@keyframes float {
-  0%   { transform: translateY(0px); }
-  50%  { transform: translateY(-8px); }
-  100% { transform: translateY(0px); }
-}
-
-.float {
-  animation: float 5.5s ease-in-out infinite;
-}
-
-input[type="text"] {
-  border-radius: 12px !important;
-}
-</style>
-""",
-    unsafe_allow_html=True,
+st.sidebar.markdown(
+    "- **GitHub Token**: " + ("✅ set" if GITHUB_TOKEN else "⚠️ not set (using anonymous access)")
 )
+st.sidebar.markdown(
+    "- **Gemini Key**: " + ("✅ set" if GEMINI_API_KEY else "⚠️ not set (using fallback summary)")
+)
+
+st.sidebar.markdown(
+    """---
+**How to set keys (cmd)**
+
+```cmd
+set GITHUB_TOKEN=your_pat
+set GEMINI_API_KEY=your_gemini_key
+```
+Then run:
+
+```cmd
+M:\\GitRate\\.venv\\Scripts\\python.exe -m streamlit run app.py
+```
+"""
+)
+
+bg = "#f5f5f7"
+accent = "#2563eb"
+card = "rgba(255, 255, 255, 0.96)"
+card_border = "rgba(15, 23, 42, 0.06)"
+text = "rgba(15, 23, 42, 0.94)"
+muted = "rgba(15, 23, 42, 0.65)"
+bg_grad_1 = "rgba(37, 99, 235, 0.20)"
+bg_grad_2 = "rgba(56, 189, 248, 0.18)"
+
+style_css = f"""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap');
+
+:root {{
+    --bg: {bg};
+    --accent: {accent};
+    --card: {card};
+    --card-border: {card_border};
+    --text: {text};
+    --muted: {muted};
+}}
+
+html, body, [data-testid="stAppViewContainer"], .stApp {{
+    font-family: 'Space Grotesk', system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    color: var(--text);
+}}
+
+.stApp {{
+    background:
+        radial-gradient(1200px 600px at 20% 10%, {bg_grad_1}, transparent 55%),
+        radial-gradient(900px 500px at 85% 15%, {bg_grad_2}, transparent 55%),
+        var(--bg);
+}}
+
+.block-container {{
+    padding-top: 2.5rem;
+    padding-bottom: 3rem;
+    max-width: 1100px;
+}}
+
+h1, h2, h3 {{
+    color: var(--text);
+}}
+
+.space-card {{
+    background: var(--card);
+    border: 1px solid var(--card-border);
+    border-radius: 16px;
+    padding: 16px 18px;
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    box-shadow: 0 18px 45px rgba(15, 23, 42, 0.32);
+}}
+
+.neon-title {{
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-size: 12px;
+    color: var(--muted);
+}}
+
+.neon-accent {{
+    color: var(--accent);
+}}
+
+.kpi {{
+    font-size: 42px;
+    font-weight: 700;
+    line-height: 1.0;
+    margin: 0;
+}}
+
+.kpi-sub {{
+    margin-top: 4px;
+    color: var(--muted);
+}}
+
+.meta {{
+    margin-top: 10px;
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.5;
+}}
+
+hr.space {{
+    border: none;
+    border-top: 1px solid rgba(15, 23, 42, 0.08);
+    margin: 12px 0;
+}}
+
+@keyframes float {{
+    0%   {{ transform: translateY(0px); }}
+    50%  {{ transform: translateY(-6px); }}
+    100% {{ transform: translateY(0px); }}
+}}
+
+.float {{
+    animation: float 5.5s ease-in-out infinite;
+}}
+
+input[type="text"] {{
+    border-radius: 10px !important;
+}}
+</style>
+"""
+
+st.markdown(style_css, unsafe_allow_html=True)
 
 st.title("🚀 GitHub Repository Analyzer")
 
@@ -512,36 +691,41 @@ analyze_clicked = st.button("Analyze Repository")
 
 if analyze_clicked:
     owner, repo_name, err = parse_repo_url(repo_url)
-    if err:
-        st.error(err)
+    if err or owner is None or repo_name is None:
+        st.error(err or "Please paste a GitHub repository URL.")
     else:
         with st.spinner("Scanning repository telemetry..."):
             try:
                 data = fetch_repo_data(owner, repo_name)
             except Exception as e:
-                msg = "Could not fetch repository data. "
-                msg += "If this is a valid public repo, try again in a moment."
-                st.error(msg)
+                st.error(
+                    "Could not fetch repository data. "
+                    "Details: " + str(e)
+                )
                 data = None
 
         if data is not None:
-            repo_info = data.get("repo") or {}
-            contents = data.get("contents") or []
-            languages = data.get("languages") or {}
-            commits = data.get("commits") or {}
+            repo_info: Dict[str, Any] = data.get("repo") or {}
+            contents: List[Dict[str, str]] = data.get("contents") or []
+            languages: Dict[str, int] = data.get("languages") or {}
+            commits: Dict[str, Any] = data.get("commits") or {}
 
-            score = calculate_score(repo_info, contents, languages, commits)
+            quality_files: List[str] = cast(List[str], data.get("quality_files") or [])
+            readme_content: str = str(data.get("readme_content") or "")
+
+            score_data = calculate_score(repo_info, contents, languages, commits, quality_files)
+            score_val: int = int(score_data.get("score", 0))
+            breakdown: List[str] = cast(List[str], score_data.get("breakdown", []) or [])
 
             with st.spinner("Generating AI mission briefing..."):
-                insights = generate_ai_insights(repo_info, contents, languages, commits, score)
+                insights = generate_ai_insights(repo_info, contents, languages, commits, score_data, readme_content, quality_files)
 
             summary = (insights or {}).get("summary", "") or ""
-            roadmap = (insights or {}).get("roadmap", []) or []
+            roadmap: List[str] = cast(List[str], (insights or {}).get("roadmap", []) or [])
 
-            lang_list = []
+            lang_list: List[str] = []
             try:
-                if isinstance(languages, dict):
-                    lang_list = sorted([k for k in languages.keys() if k])
+                lang_list = sorted([k for k in languages.keys() if k])
             except Exception:
                 lang_list = []
 
@@ -572,12 +756,21 @@ if analyze_clicked:
 <div class="space-card float">
   <div class="neon-title">Mission Score</div>
   <hr class="space"/>
-  <p class="kpi"><span class="neon-accent">{score}</span><span style="font-size:18px; color: rgba(255,255,255,0.70);">/100</span></p>
+  <p class="kpi"><span class="neon-accent">{score_val}</span><span style="font-size:18px; color: rgba(15,23,42,0.75);">/100</span></p>
   <div class="meta">
+        <div style="margin-bottom: 6px;">
+            <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: rgba(15,23,42,0.7); margin-bottom: 2px;">Score health</div>
+            <div style="width: 100%; height: 6px; border-radius: 999px; background: rgba(15,23,42,0.06); overflow: hidden;">
+                <div style="width: {score_val}%; height: 100%; background: linear-gradient(90deg, #2563eb, #22c55e);"></div>
+            </div>
+        </div>
     <div><span class="neon-accent">Repo:</span> {(repo_info.get('full_name') or '').strip()}</div>
     <div><span class="neon-accent">Languages:</span> {(', '.join(lang_list) if lang_list else 'None detected')}</div>
     <div><span class="neon-accent">Commits:</span> {commit_count}</div>
     <div><span class="neon-accent">Last Commit:</span> {last_commit_display}</div>
+    <div><span class="neon-accent">PRs:</span> {repo_info.get('pr_count', 0)} | <span class="neon-accent">Branches:</span> {repo_info.get('branch_count', 1)}</div>
+    <div><span class="neon-accent">License:</span> {repo_info.get('license_name', 'None')}</div>
+    <div><span class="neon-accent">Contributors:</span> {repo_info.get('contributors_count', 0)}</div>
   </div>
 </div>
 """,
@@ -590,13 +783,45 @@ if analyze_clicked:
 <div class="space-card float">
   <div class="neon-title">AI Summary</div>
   <hr class="space"/>
-  <div style="color: rgba(255,255,255,0.88); line-height: 1.6;">{summary}</div>
+    <div style="color: rgba(15,23,42,0.9); line-height: 1.6;">{summary}</div>
 </div>
 """,
                     unsafe_allow_html=True,
                 )
 
             st.markdown("<div style='height: 16px;'></div>", unsafe_allow_html=True)
+
+            with st.expander("View Score Breakdown"):
+                if breakdown:
+                    for item in breakdown:
+                        st.write(f"- {item}")
+                else:
+                    st.write("No breakdown available.")
+
+            # Simple Markdown export of the assessment
+            report_lines: List[str] = []
+            report_lines.append(f"# GitRate Report for {(repo_info.get('full_name') or '').strip()}")
+            report_lines.append("")
+            report_lines.append(f"**Score:** {score_val}/100")
+            report_lines.append("")
+            if summary:
+                report_lines.append("## AI Summary")
+                report_lines.append("")
+                report_lines.append(summary)
+                report_lines.append("")
+            if breakdown:
+                report_lines.append("## Score Breakdown")
+                report_lines.append("")
+                for item in breakdown:
+                    report_lines.append(f"- {item}")
+                report_lines.append("")
+            if roadmap:
+                report_lines.append("## Personalized Roadmap")
+                report_lines.append("")
+                for step in roadmap:
+                    report_lines.append(f"- {step}")
+
+            report_md = "\n".join(report_lines)
 
             st.markdown(
                 """
@@ -608,9 +833,17 @@ if analyze_clicked:
                 unsafe_allow_html=True,
             )
 
-            if isinstance(roadmap, list) and len(roadmap) > 0:
+            if roadmap:
                 for step in roadmap:
-                    if isinstance(step, str) and step.strip():
-                        st.markdown(f"- {step.strip()}")
+                    st.markdown(f"- {step.strip()}")
             else:
                 st.markdown("- Add documentation, tests, and a clear project structure.")
+
+            st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
+
+            st.download_button(
+                label="⬇️ Download report as Markdown",
+                data=report_md,
+                file_name="gitrate-report.md",
+                mime="text/markdown",
+            )
