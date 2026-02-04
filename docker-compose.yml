@@ -1,0 +1,180 @@
+version: '3.9'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: gitrate-postgres
+    environment:
+      POSTGRES_USER: gitrate
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-gitrate_dev_password}
+      POSTGRES_DB: gitrate_audit
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gitrate"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - gitrate-network
+
+  # Redis Cache & Message Broker
+  redis:
+    image: redis:7-alpine
+    container_name: gitrate-redis
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-gitrate_dev_password}
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - gitrate-network
+
+  # FastAPI Backend
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: gitrate-backend
+    environment:
+      DATABASE_URL: postgresql+asyncpg://gitrate:${DB_PASSWORD:-gitrate_dev_password}@postgres:5432/gitrate_audit
+      REDIS_URL: redis://:${REDIS_PASSWORD:-gitrate_dev_password}@redis:6379/0
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./gitrate:/app/gitrate
+      - ./reports:/app/reports
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn gitrate.main:app --host 0.0.0.0 --port 8000 --reload"
+    networks:
+      - gitrate-network
+
+  # Celery Worker for async tasks
+  celery-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: gitrate-celery-worker
+    environment:
+      DATABASE_URL: postgresql+asyncpg://gitrate:${DB_PASSWORD:-gitrate_dev_password}@postgres:5432/gitrate_audit
+      REDIS_URL: redis://:${REDIS_PASSWORD:-gitrate_dev_password}@redis:6379/0
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./gitrate:/app/gitrate
+      - ./reports:/app/reports
+    command: celery -A gitrate.tasks worker --loglevel=info --concurrency=4
+    networks:
+      - gitrate-network
+
+  # Celery Beat Scheduler
+  celery-beat:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: gitrate-celery-beat
+    environment:
+      DATABASE_URL: postgresql+asyncpg://gitrate:${DB_PASSWORD:-gitrate_dev_password}@postgres:5432/gitrate_audit
+      REDIS_URL: redis://:${REDIS_PASSWORD:-gitrate_dev_password}@redis:6379/0
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./gitrate:/app/gitrate
+    command: celery -A gitrate.tasks beat --loglevel=info
+    networks:
+      - gitrate-network
+
+  # Next.js Frontend
+  frontend:
+    build:
+      context: ./gitrate-ui
+      dockerfile: Dockerfile
+    container_name: gitrate-frontend
+    environment:
+      NEXT_PUBLIC_API_URL: http://backend:8000
+      NODE_ENV: ${NODE_ENV:-development}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    volumes:
+      - ./gitrate-ui:/app
+      - /app/node_modules
+    command: npm run dev
+    networks:
+      - gitrate-network
+
+  # Prometheus Monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: gitrate-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - gitrate-network
+
+  # Grafana Dashboard
+  grafana:
+    image: grafana/grafana:latest
+    container_name: gitrate-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_INSTALL_PLUGINS: redis-datasource
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana:/etc/grafana/provisioning
+    depends_on:
+      - prometheus
+    networks:
+      - gitrate-network
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  gitrate-network:
+    driver: bridge
