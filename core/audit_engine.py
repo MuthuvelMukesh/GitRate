@@ -3,7 +3,7 @@
 import logging
 import uuid
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from enum import Enum
 
 from core.models import (
@@ -14,6 +14,17 @@ from core.models import (
 from integrations.github_api import GitHubFetcher
 from utils.helpers import calculate_risk_score, estimate_hours_to_fix
 from utils.constants import RISK_THRESHOLDS
+from auditors import (
+    IPLegalAuditor,
+    TeamSustainabilityAuditor,
+    CodeQualityAuditor,
+    SecurityAuditor,
+)
+from report_generators import (
+    PDFReportGenerator,
+    ComplianceCertificateGenerator,
+    RoadmapGenerator,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -168,114 +179,63 @@ class AuditEngine:
             self.active_audits[audit_id]["status"] = AuditStatus.FAILED
             return None, error
     
-    # ===== STUB AUDITORS (To be implemented in Phase 3) =====
+    # ===== PHASE 3: REAL AUDITORS =====
     
     async def _audit_ip_legal(
         self,
         repo_data: RepositoryData,
     ) -> tuple[float, List[AuditFinding]]:
-        """IP & Legal audit (Phase 3 implementation)."""
-        logger.debug("Running IP & Legal audit (stub)")
-        
-        findings: List[AuditFinding] = []
-        score = 75.0  # Default score
-        
-        # TODO: Implement:
-        # - License scanning
-        # - Plagiarism detection
-        # - Dependency provenance
-        # - License compatibility
-        
-        return score, findings
+        """Run IP & Legal audit using real implementation."""
+        try:
+            auditor = IPLegalAuditor()
+            score, findings = await auditor.run(repo_data)
+            logger.debug(f"IP & Legal audit completed: {score:.1f}/100 with {len(findings)} findings")
+            return score, findings
+        except Exception as e:
+            logger.error(f"IP & Legal audit failed: {str(e)}", exc_info=True)
+            return 75.0, []
     
     async def _audit_team_sustainability(
         self,
         repo_data: RepositoryData,
     ) -> tuple[float, List[AuditFinding]]:
-        """Team sustainability audit (Phase 3 implementation)."""
-        logger.debug("Running Team Sustainability audit (stub)")
-        
-        findings: List[AuditFinding] = []
-        score = 70.0  # Default score
-        
-        # Start with basic analysis from repo data
-        if repo_data.contributors.total_contributors < 3:
-            findings.append(AuditFinding(
-                category="Team Sustainability",
-                severity="HIGH",
-                title="Low contributor count",
-                description=f"Only {repo_data.contributors.total_contributors} contributors found",
-                recommendation="Expand development team or improve contributor attraction",
-                estimation_hours=40,
-            ))
-            score -= 20
-        
-        # TODO: Implement full:
-        # - Bus factor analysis
-        # - Knowledge silo mapping
-        # - Onboarding velocity
-        # - Team stability metrics
-        
-        return score, findings
+        """Run Team Sustainability audit using real implementation."""
+        try:
+            auditor = TeamSustainabilityAuditor()
+            score, findings = await auditor.run(repo_data)
+            logger.debug(f"Team Sustainability audit completed: {score:.1f}/100 with {len(findings)} findings")
+            return score, findings
+        except Exception as e:
+            logger.error(f"Team Sustainability audit failed: {str(e)}", exc_info=True)
+            return 70.0, []
     
     async def _audit_code_quality(
         self,
         repo_data: RepositoryData,
     ) -> tuple[float, List[AuditFinding]]:
-        """Code quality audit (Phase 3 implementation)."""
-        logger.debug("Running Code Quality audit (stub)")
-        
-        findings: List[AuditFinding] = []
-        score = 65.0  # Default score
-        
-        # Basic checks from repo data
-        if not repo_data.testing.has_tests:
-            findings.append(AuditFinding(
-                category="Code Quality",
-                severity="HIGH",
-                title="Missing test directory",
-                description="No tests/ or test/ directory found",
-                recommendation="Implement comprehensive test suite",
-                estimation_hours=200,
-            ))
-            score -= 25
-        
-        if not repo_data.documentation.has_readme:
-            findings.append(AuditFinding(
-                category="Code Quality",
-                severity="MEDIUM",
-                title="Missing README",
-                description="No README.md found",
-                recommendation="Create comprehensive README documentation",
-                estimation_hours=10,
-            ))
-            score -= 10
-        
-        # TODO: Implement full:
-        # - Code churn hotspots
-        # - Technical debt estimation
-        # - Test integrity verification
-        # - Dead code detection
-        
-        return score, findings
+        """Run Code Quality audit using real implementation."""
+        try:
+            auditor = CodeQualityAuditor()
+            score, findings = await auditor.run(repo_data)
+            logger.debug(f"Code Quality audit completed: {score:.1f}/100 with {len(findings)} findings")
+            return score, findings
+        except Exception as e:
+            logger.error(f"Code Quality audit failed: {str(e)}", exc_info=True)
+            return 65.0, []
     
     async def _audit_security(
         self,
         repo_data: RepositoryData,
     ) -> tuple[float, List[AuditFinding]]:
-        """Security audit (Phase 3 implementation)."""
-        logger.debug("Running Security audit (stub)")
-        
-        findings: List[AuditFinding] = []
-        score = 72.0  # Default score
-        
-        # TODO: Implement:
-        # - CVE scanning
-        # - Secrets detection
-        # - Architecture scalability
-        # - Infrastructure security
-        
-        return score, findings
+        """Run Security audit using real implementation."""
+        try:
+            auditor = SecurityAuditor()
+            score, findings = await auditor.run(repo_data)
+            logger.debug(f"Security audit completed: {score:.1f}/100 with {len(findings)} findings")
+            return score, findings
+        except Exception as e:
+            logger.error(f"Security audit failed: {str(e)}", exc_info=True)
+            return 72.0, []
     
     # ===== HELPER METHODS =====
     
@@ -480,8 +440,135 @@ class AuditEngine:
         critical_count = len([f for f in findings if f.severity == "CRITICAL"])
         
         if overall >= 75 and critical_count == 0:
-            return "GO"
+            return "GREEN - Proceed with acquisition"
         elif overall >= 60 and critical_count <= 2:
-            return "CAUTION"
+            return "YELLOW - Conditional proceed with risk mitigation"
         else:
-            return "NO_GO"
+            return "RED - Address critical issues before acquisition"
+    
+    # ===== REPORT GENERATION =====
+    
+    async def generate_pdf_report(self, audit_result: AcquisitionAuditResult) -> Tuple[bytes, str]:
+        """Generate professional PDF report.
+        
+        Args:
+            audit_result: Complete audit result
+        
+        Returns:
+            Tuple of (PDF bytes, filename)
+        """
+        try:
+            logger.info(f"[{audit_result.audit_id}] Generating PDF report")
+            
+            generator = PDFReportGenerator(audit_result)
+            pdf_bytes = await generator.generate()
+            
+            filename = f"GitRate_Audit_{audit_result.repository.replace('/', '_')}_{audit_result.audit_id}.pdf"
+            
+            logger.info(f"[{audit_result.audit_id}] PDF report generated: {len(pdf_bytes)} bytes")
+            return pdf_bytes, filename
+            
+        except Exception as e:
+            logger.error(f"PDF generation failed: {str(e)}", exc_info=True)
+            raise
+    
+    async def generate_compliance_certificate(self, audit_result: AcquisitionAuditResult) -> Tuple[bytes, str]:
+        """Generate compliance certificate.
+        
+        Args:
+            audit_result: Complete audit result
+        
+        Returns:
+            Tuple of (PDF bytes, filename)
+        """
+        try:
+            logger.info(f"[{audit_result.audit_id}] Generating compliance certificate")
+            
+            generator = ComplianceCertificateGenerator(audit_result)
+            cert_bytes = await generator.generate()
+            
+            filename = f"GitRate_Certificate_{audit_result.audit_id}.pdf"
+            
+            logger.info(f"[{audit_result.audit_id}] Certificate generated: {len(cert_bytes)} bytes")
+            return cert_bytes, filename
+            
+        except Exception as e:
+            logger.error(f"Certificate generation failed: {str(e)}", exc_info=True)
+            raise
+    
+    async def generate_remediation_roadmap(self, audit_result: AcquisitionAuditResult,
+                                          team_size: int = 3) -> Tuple[List[RoadmapTask], str]:
+        """Generate 90-day remediation roadmap.
+        
+        Args:
+            audit_result: Complete audit result
+            team_size: Size of remediation team
+        
+        Returns:
+            Tuple of (list of tasks, summary text)
+        """
+        try:
+            logger.info(f"[{audit_result.audit_id}] Generating remediation roadmap")
+            
+            generator = RoadmapGenerator(audit_result, team_size=team_size)
+            roadmap_tasks = await generator.generate()
+            
+            summary = generator.get_executive_summary(roadmap_tasks)
+            
+            logger.info(f"[{audit_result.audit_id}] Roadmap generated with {len(roadmap_tasks)} tasks")
+            return roadmap_tasks, summary
+            
+        except Exception as e:
+            logger.error(f"Roadmap generation failed: {str(e)}", exc_info=True)
+            raise
+    
+    async def generate_all_reports(self, audit_result: AcquisitionAuditResult, 
+                                   team_size: int = 3) -> Dict[str, Any]:
+        """Generate all reports in one call.
+        
+        Args:
+            audit_result: Complete audit result
+            team_size: Size of remediation team
+        
+        Returns:
+            Dict with all generated reports
+        """
+        logger.info(f"[{audit_result.audit_id}] Generating all reports")
+        
+        try:
+            # Generate PDF
+            pdf_bytes, pdf_filename = await self.generate_pdf_report(audit_result)
+            
+            # Generate certificate
+            cert_bytes, cert_filename = await self.generate_compliance_certificate(audit_result)
+            
+            # Generate roadmap
+            roadmap_tasks, roadmap_summary = await self.generate_remediation_roadmap(
+                audit_result, team_size
+            )
+            
+            result = {
+                "pdf": {
+                    "content": pdf_bytes,
+                    "filename": pdf_filename,
+                    "size": len(pdf_bytes),
+                },
+                "certificate": {
+                    "content": cert_bytes,
+                    "filename": cert_filename,
+                    "size": len(cert_bytes),
+                },
+                "roadmap": {
+                    "tasks": roadmap_tasks,
+                    "summary": roadmap_summary,
+                    "task_count": len(roadmap_tasks),
+                },
+                "generated_at": datetime.utcnow().isoformat(),
+            }
+            
+            logger.info(f"[{audit_result.audit_id}] All reports generated successfully")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Report generation failed: {str(e)}", exc_info=True)
+            raise

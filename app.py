@@ -4,13 +4,23 @@ import logging
 from datetime import datetime
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.compression import GZipMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 
 from core.audit_engine import AuditEngine, AuditStatus
 from core.models import AuditRequest, AuditResponse, HealthCheckResponse
+from core.webhooks import (
+    GitHubWebhookHandler, GitLabWebhookHandler,
+    GitHubWebhookPayload, GitLabWebhookPayload,
+    WebhookValidator, webhook_queue
+)
+from pages.dashboard import router as dashboard_router
+from pages.components import router as dashboard_ui_router
+from pages.trends import router as trends_router
+from pages.ml_analytics import router as ml_analytics_router
+from pages.ml_dashboard import router as ml_dashboard_router
 from utils.config import settings
 
 # Configure logging
@@ -61,8 +71,20 @@ if settings.environment != "production":
 # Compression middleware
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
+# ===== ROUTE REGISTRATION =====
 
-# ===== EXCEPTION HANDLERS =====
+# Include dashboard routes (Phase 6)
+app.include_router(dashboard_router)
+app.include_router(dashboard_ui_router, prefix="/dashboard")
+app.include_router(trends_router)
+
+# Include ML analytics routes (Phase 7)
+app.include_router(ml_analytics_router)
+
+# Include ML dashboard UI (Phase 8)
+app.include_router(ml_dashboard_router, prefix="/ml-dashboard")
+
+
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc):
@@ -281,7 +303,166 @@ async def generate_html_report(audit_id: str):
     }
 
 
-# ===== STARTUP =====
+# ===== WEBHOOK ENDPOINTS =====
+
+@app.post("/webhooks/github", tags=["Webhooks"])
+async def github_webhook(
+    request: Request,
+    x_hub_signature_256: str = Header(None),
+):
+    """
+    GitHub webhook endpoint for event-driven audits.
+    
+    Configure in GitHub:
+    1. Repository Settings → Webhooks
+    2. Payload URL: https://your-domain/webhooks/github
+    3. Content type: application/json
+    4. Events: Push, Pull requests, Releases
+    5. Set secret matching GITHUB_WEBHOOK_SECRET env var
+    """
+    try:
+        # Get raw body for signature validation
+        body = await request.body()
+        
+        # Validate signature if secret is configured
+        if settings.github_webhook_secret:
+            if not x_hub_signature_256:
+                logger.warning("GitHub webhook received without signature")
+                return JSONResponse(
+                    status_code=401,
+                    content={"error": "Missing signature"}
+                )
+            
+            if not WebhookValidator.validate_github_signature(
+                body, x_hub_signature_256, settings.github_webhook_secret
+            ):
+                logger.warning("GitHub webhook signature validation failed")
+                return JSONResponse(
+                    status_code=401,
+                    content={"error": "Invalid signature"}
+                )
+        
+        # Parse payload
+        import json
+        payload_dict = json.loads(body)
+        payload = GitHubWebhookPayload(**payload_dict)
+        
+        # Convert to normalized event
+        event = GitHubWebhookHandler.parse_payload(payload)
+        if not event:
+            logger.debug("GitHub webhook event not relevant for auditing")
+            return JSONResponse(
+                status_code=200,
+                content={"status": "ignored"}
+            )
+        
+        # Queue for processing
+        event_id = webhook_queue.enqueue(event)
+        
+        logger.info(f"GitHub webhook queued: {event_id} ({event.owner}/{event.repo})")
+        
+        return JSONResponse(
+            status_code=202,
+            content={
+                "status": "accepted",
+                "event_id": event_id,
+                "repository": f"{event.owner}/{event.repo}",
+                "event_type": event.event_type.value,
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"GitHub webhook error: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=400,
+            content={"error": str(e)}
+        )
+
+
+@app.post("/webhooks/gitlab", tags=["Webhooks"])
+async def gitlab_webhook(
+    request: Request,
+    x_gitlab_token: str = Header(None),
+):
+    """
+    GitLab webhook endpoint for event-driven audits.
+    
+    Configure in GitLab:
+    1. Project Settings → Webhooks
+    2. URL: https://your-domain/webhooks/gitlab
+    3. Events: Push, Merge requests, Releases
+    4. Set secret token matching GITLAB_WEBHOOK_SECRET env var
+    """
+    try:
+        # Get raw body for signature validation
+        body = await request.body()
+        
+        # Validate token if secret is configured
+        if settings.gitlab_webhook_secret:
+            if not x_gitlab_token:
+                logger.warning("GitLab webhook received without token")
+                return JSONResponse(
+                    status_code=401,
+                    content={"error": "Missing token"}
+                )
+            
+            if not WebhookValidator.validate_gitlab_signature(
+                body, x_gitlab_token, settings.gitlab_webhook_secret
+            ):
+                logger.warning("GitLab webhook token validation failed")
+                return JSONResponse(
+                    status_code=401,
+                    content={"error": "Invalid token"}
+                )
+        
+        # Parse payload
+        import json
+        payload_dict = json.loads(body)
+        payload = GitLabWebhookPayload(**payload_dict)
+        
+        # Convert to normalized event
+        event = GitLabWebhookHandler.parse_payload(payload)
+        if not event:
+            logger.debug("GitLab webhook event not relevant for auditing")
+            return JSONResponse(
+                status_code=200,
+                content={"status": "ignored"}
+            )
+        
+        # Queue for processing
+        event_id = webhook_queue.enqueue(event)
+        
+        logger.info(f"GitLab webhook queued: {event_id} ({event.owner}/{event.repo})")
+        
+        return JSONResponse(
+            status_code=202,
+            content={
+                "status": "accepted",
+                "event_id": event_id,
+                "repository": f"{event.owner}/{event.repo}",
+                "event_type": event.event_type.value,
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"GitLab webhook error: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=400,
+            content={"error": str(e)}
+        )
+
+
+@app.get("/webhooks/status", tags=["Webhooks"])
+async def webhook_status():
+    """
+    Get webhook queue status.
+    
+    Returns:
+        Queue status and pending events
+    """
+    return webhook_queue.get_queue_status()
+
+
 
 if __name__ == "__main__":
     import uvicorn

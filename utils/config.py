@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     # ===== GITHUB =====
     github_token: Optional[str] = Field(default=None, env="GITHUB_TOKEN")
     github_api_base_url: str = Field(default="https://api.github.com", env="GITHUB_API_BASE_URL")
+    github_webhook_secret: Optional[str] = Field(default=None, env="GITHUB_WEBHOOK_SECRET")
+    gitlab_webhook_secret: Optional[str] = Field(default=None, env="GITLAB_WEBHOOK_SECRET")
     
     # ===== AI/LLM =====
     anthropic_api_key: Optional[str] = Field(default=None, env="ANTHROPIC_API_KEY")
