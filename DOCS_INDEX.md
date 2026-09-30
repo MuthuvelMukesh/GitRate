@@ -1,5 +1,9 @@
 # GitRate Platform - Complete Documentation Index
 
+> **Current navigation:** start with [docs/README.md](docs/README.md). This
+> index is a legacy catalog retained for compatibility; some entries describe
+> earlier package layouts and historical project states.
+
 **Version**: 2.0.0 (Production)  
 **Status**: ✅ ALL PHASES COMPLETE - PRODUCTION READY  
 **Date**: February 5, 2026

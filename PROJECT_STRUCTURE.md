@@ -1,5 +1,8 @@
 # GitRate - Complete Project Structure After Phase 1
 
+> **Historical document:** this describes the original scaffold. The current
+> package layout is documented in [docs/PROJECT_STRUCTURE_CURRENT.md](docs/PROJECT_STRUCTURE_CURRENT.md).
+
 ## 📁 Directory Tree
 
 ```

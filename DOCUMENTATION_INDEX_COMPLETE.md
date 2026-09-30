@@ -1,5 +1,9 @@
 # GitRate Platform - Complete Documentation Index
 
+> **Current navigation:** start with [docs/README.md](docs/README.md). This
+> index is a legacy catalog retained for compatibility; some entries describe
+> earlier package layouts and historical project states.
+
 **Platform Version**: 2.6 (Phase 6 Complete)  
 **Status**: Production Ready ✅  
 **Total LOC**: 12,450+  

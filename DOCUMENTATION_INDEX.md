@@ -1,5 +1,9 @@
 # GitRate Documentation Index
 
+> **Current navigation:** start with [docs/README.md](docs/README.md). This
+> index is a legacy catalog retained for compatibility; some entries describe
+> earlier package layouts and historical project states.
+
 ## 🚀 Getting Started
 
 **New to GitRate?** Start here:
