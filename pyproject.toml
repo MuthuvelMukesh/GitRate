@@ -166,23 +166,27 @@ ignore_missing_imports = true
 plugins = ["pydantic.mypy"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
-asyncio_mode = "auto"
-addopts = "--cov=gitrate --cov-report=html --cov-report=term-missing"
-env = ["ENVIRONMENT=test"]
+# Intentionally removed: pytest configuration now lives ONLY in pytest.ini so there
+# is a single source of truth. See docs/IMPLEMENTATION_GAP_ANALYSIS.md (G-14).
 
 [tool.coverage.run]
 source = ["gitrate"]
-omit = ["*/tests/*", "*/migrations/*"]
+branch = true
+omit = [
+    "gitrate/tests/*",
+    "gitrate/database/migrations/*",
+    "tools/*",
+]
 
 [tool.coverage.report]
 exclude_lines = [
     "pragma: no cover",
     "def __repr__",
-    "raise AssertionError",
-    "raise NotImplementedError",
     "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
 ]
+
 
 [build-system]
 requires = ["poetry-core"]

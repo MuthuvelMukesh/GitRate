@@ -1,0 +1,54 @@
+groups:
+  - name: gitrate-critical
+    rules:
+      # A failing audit rate above 25% over 15 minutes is an operational incident:
+      # it means the pipeline cannot reliably produce evidence.
+      - alert: GitRateAuditFailureRateHigh
+        expr: |
+          sum(rate(gitrate_audits_total{status="failed"}[15m]))
+            / clamp_min(sum(rate(gitrate_audits_total[15m])), 0.0001) > 0.25
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Audit failure rate above 25%"
+          description: "Over 25% of audits failed in the last 15 minutes."
+
+      - alert: GitRateAuditDurationP95High
+        expr: histogram_quantile(0.95, sum(rate(gitrate_audit_duration_seconds_bucket[15m])) by (le)) > 300
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p95 audit duration above the 300s audit budget"
+
+      - alert: GitRateQueueDepthHigh
+        expr: gitrate_queue_depth > 50
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Audit queue depth above 50 pending tasks"
+
+      - alert: GitRateGitHubRateLimitLow
+        expr: gitrate_github_rate_limit_remaining < 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "GitHub API rate limit budget nearly exhausted"
+
+      - alert: GitRateWorkerUnavailable
+        expr: gitrate_worker_up == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No audit worker heartbeat in the last 5 minutes"
+
+      - alert: GitRateReportGenerationFailures
+        expr: increase(gitrate_reports_total{status="failed"}[30m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Report generation failed in the last 30 minutes"

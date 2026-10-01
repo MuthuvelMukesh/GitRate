@@ -1,69 +1,72 @@
 #!/usr/bin/env python
-"""Test runner script with coverage reporting."""
+"""Test runner script: quality gates + test suite + coverage.
+
+Usage:
+    python run_tests.py            # tests + coverage
+    python run_tests.py --quality  # additionally run ruff/black/mypy/bandit gates
+"""
 
 import subprocess
 import sys
 from pathlib import Path
 
+# Coverage targets: the *real* package (previously targeted the non-existent
+# top-level modules core/integrations/utils - see docs/IMPLEMENTATION_GAP_ANALYSIS.md).
+COVERAGE_TARGETS = ["gitrate.core", "gitrate.auditors", "gitrate.evidence", "gitrate.intelligence", "gitrate.reports"]
+QUALITY_GATES = [
+    (["ruff", "check", "."], "Ruff lint"),
+    (["black", "--check", "."], "Black formatting"),
+    (["mypy", "gitrate"], "MyPy type check"),
+    (["bandit", "-r", "gitrate", "-ll"], "Bandit security scan"),
+]
+
 
 def run_command(cmd: list, description: str) -> int:
     """Run a command and return the exit code."""
     print(f"\n{'=' * 70}")
-    print(f"▶ {description}")
+    print(f">> {description}")
     print(f"{'=' * 70}")
     print(f"Command: {' '.join(cmd)}\n")
-    
-    result = subprocess.run(cmd)
-    return result.returncode
+    return subprocess.run(cmd).returncode
 
 
-def main():
-    """Run test suite with coverage."""
-    test_dir = Path(__file__).parent
-    
+def main() -> int:
+    """Run the test suite, coverage and (optionally) the quality gates."""
+    run_quality = "--quality" in sys.argv
+
     print("\n" + "=" * 70)
-    print("GitRate Acquisition Audit - Test Suite Runner")
+    print("GitRate Technical Due-Diligence Platform - Test Suite Runner")
     print("=" * 70)
-    
-    # 1. Run all tests
-    exitcode = run_command(
-        ["pytest", "tests/", "-v", "--tb=short"],
-        "Running all tests"
-    )
-    
+
+    exitcode = run_command(["python", "-m", "pytest", "-q"], "Running all tests")
     if exitcode != 0:
-        print("\n❌ Tests failed!")
+        print("\nTests failed - see output above.")
         return exitcode
-    
-    print("\n✅ All tests passed!")
-    
-    # 2. Run with coverage
-    exitcode = run_command(
-        ["pytest", "tests/", "-v", "--cov=core", "--cov=integrations", 
-         "--cov=utils", "--cov-report=html", "--cov-report=term-missing"],
-        "Running tests with coverage analysis"
+
+    cov_args = [f"--cov={target}" for target in COVERAGE_TARGETS]
+    coverage_code = run_command(
+        ["python", "-m", "pytest", "-q", *cov_args, "--cov-report=term-missing"],
+        "Running tests with coverage analysis",
     )
-    
-    # 3. Show test summary
+
+    test_files = sorted(Path("gitrate/tests").rglob("test_*.py"))
+    print(f"\nTest files: {len(test_files)}")
+    for path in test_files:
+        print(f"   - {path}")
+
+    if run_quality:
+        for cmd, description in QUALITY_GATES:
+            code = run_command(cmd, description)
+            if code != 0:
+                print(f"\nQuality gate failed: {description}")
+                return code
+
     print("\n" + "=" * 70)
-    print("Test Execution Summary")
+    print("Test suite complete (coverage report: htmlcov/index.html)")
     print("=" * 70)
-    
-    # Count test files
-    test_files = list(Path("tests").rglob("test_*.py"))
-    print(f"\n📊 Test Files: {len(test_files)}")
-    for f in sorted(test_files):
-        print(f"   - {f.relative_to(Path.cwd())}")
-    
-    # Show coverage report location
-    print(f"\n📈 Coverage Report: htmlcov/index.html")
-    
-    print("\n" + "=" * 70)
-    print("✅ Test Suite Complete")
-    print("=" * 70)
-    
-    return exitcode
+    return coverage_code
 
 
 if __name__ == "__main__":
     sys.exit(main())
+

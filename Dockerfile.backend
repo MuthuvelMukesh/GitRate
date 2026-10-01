@@ -5,33 +5,36 @@ WORKDIR /app
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     git \
+    curl \
     postgresql-client \
     libpq-dev \
     build-essential \
     libffi-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Poetry
-RUN pip install --no-cache-dir poetry==1.7.0
+# Install Python dependencies from the pinned requirements file.
+# (The previous Dockerfile used `poetry install` with a pyproject that referenced a
+#  `gitrate` package which did not exist, and copied `./alembic` + `alembic.ini`
+#  which were never in the repository - see docs/IMPLEMENTATION_GAP_ANALYSIS.md.)
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy dependency files
-COPY pyproject.toml poetry.lock* ./
-
-# Install Python dependencies
-RUN poetry config virtualenvs.create false && \
-    poetry install --no-interaction --no-ansi
-
-# Copy application code
+# Copy application code, migrations and configuration
 COPY gitrate ./gitrate
-COPY alembic ./alembic
-COPY alembic.ini .
+COPY alembic.ini ./alembic.ini
+COPY monitoring ./monitoring
+
+# Run as an unprivileged user (container hardening)
+RUN useradd --create-home --uid 10001 gitrate && \
+    mkdir -p /app/reports && chown -R gitrate:gitrate /app
+USER gitrate
 
 # Expose port
 EXPOSE 8000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD python -c "import requests; requests.get('http://localhost:8000/health')"
+    CMD python -c "import urllib.request;urllib.request.urlopen('http://localhost:8000/health', timeout=5)"
 
-# Default command
+# Default command (canonical ASGI entrypoint)
 CMD ["uvicorn", "gitrate.main:app", "--host", "0.0.0.0", "--port", "8000"]
